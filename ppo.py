@@ -64,13 +64,14 @@ class ActorCritic():
         return self.pi_actor
 
 
-class DataBuffer():
+class TrajectoryData():
 
     def __init__(self):
         self.observations = []
         self.actions = []
         self.values = []
         self.rewards = []
+        self.returns = []
 
     def store(self, observation, action, value, reward):
         self.observations.append(observation)
@@ -78,18 +79,50 @@ class DataBuffer():
         self.values.append(value)
         self.rewards.append(reward)
 
+    def clear(self):
+        self.__init__()
+
+
+class DataBuffer():
+
+    def __init__(self, gamma):
+        self.gamma = gamma
+        self.observations = []
+        self.actions = []
+        self.values = []
+        self.rewards = []
+        self.returns = []
+
+    def process_and_store(self, trajectory_data):
+        self._calculate_discounted_return(trajectory_data)
+        self._store(trajectory_data)
+
+    def _calculate_discounted_return(self, trajectory_data):
+        for i in range(len(trajectory_data.rewards)):
+            return_ = 0
+            for j, reward in enumerate(trajectory_data.rewards[i:]):
+                return_ += self.gamma**j * reward
+            trajectory_data.returns.append(return_)
+
+    def _store(self, trajectory_data):
+        self.observations += (trajectory_data.observations)
+        self.actions += (trajectory_data.actions)
+        self.values += (trajectory_data.values)
+        self.rewards += (trajectory_data.rewards)
+        self.returns += (trajectory_data.returns)
+
 
 class PPO():
     """
     The main class that should be constructed externally
     """
 
-    def __init__(self, env, actor_hidden=[32,32], critic_hidden=[32,32], actor_lr=0.0003, critic_lr=0.001):
+    def __init__(self, env, actor_hidden=[32,32], critic_hidden=[32,32], actor_lr=0.0003, critic_lr=0.001, gamma=0.99):
         self.env = env
         observation_size = env.observation_space.shape[0]
         action_size = env.action_space.shape[0]
         self.actor_critic = ActorCritic(observation_size, action_size, actor_hidden, critic_hidden, actor_lr, critic_lr)
-        self.data_buffer = DataBuffer()
+        self.data_buffer = DataBuffer(gamma)
 
     def train(self, epochs = 5, steps_per_epoch = 200):
         for _ in range(epochs):
@@ -100,16 +133,21 @@ class PPO():
         self._update_model()
 
     def _collect_trajectories(self, steps_per_epoch):
+        trajectory_data = TrajectoryData()
         observation = self.env.reset()
         for _ in range(steps_per_epoch):
             action, value = self.actor_critic.forward(observation)
             new_observation, reward, done, _ = self.env.step(action)
-            self.data_buffer.store(observation, action, value, reward)
+            trajectory_data.store(observation, action, value, reward)
 
             observation = new_observation
             if done is True:
+                self.data_buffer.process_and_store(trajectory_data)
+                trajectory_data.clear()
                 observation = self.env.reset()
                 done = False
+        self.data_buffer.process_and_store(trajectory_data) # TODO: potentially dont have it cut off trajectory if steps_per_epoch reached
+
 
     def _update_model(self):
         # TODO: update model
@@ -139,7 +177,6 @@ Example showing how to use this PPO module below
 """
 if __name__ == "__main__":
     import gym
-    # from ppo import PPO
 
     env = gym.make("BipedalWalker-v3")
 
