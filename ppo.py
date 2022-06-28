@@ -34,6 +34,11 @@ class Actor(nn.Module):
         with torch.no_grad():
             return self.pi_net(observation)
 
+    def backward(self, loss):
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
 
 class Critic(nn.Module):
 
@@ -45,6 +50,11 @@ class Critic(nn.Module):
 
     def forward(self, observation):
         return self.v_net(observation)
+
+    def backward(self, loss):
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
 
 class ActorCritic():
@@ -62,6 +72,10 @@ class ActorCritic():
 
     def return_actor(self):
         return self.pi_actor
+
+    def backward(self, pi_loss, v_loss):
+        # self.pi_actor.backward(pi_loss)
+        self.v_critic.backward(v_loss)
 
 
 class TrajectoryData():
@@ -102,6 +116,8 @@ class DataBuffer():
             return_ = 0
             for j, reward in enumerate(trajectory_data.rewards[i:]):
                 return_ += self.gamma**j * reward
+            if isinstance(return_, float):
+                return_ = torch.as_tensor(return_, dtype=torch.float64)
             trajectory_data.returns.append(return_)
 
     def _store(self, trajectory_data):
@@ -124,19 +140,21 @@ class PPO():
         self.actor_critic = ActorCritic(observation_size, action_size, actor_hidden, critic_hidden, actor_lr, critic_lr)
         self.data_buffer = DataBuffer(gamma)
 
-    def train(self, epochs = 5, steps_per_epoch = 200):
+    def train(self, epochs = 1, env_steps_per_epoch = 200): # TODO implement multiple gradient descent step capability
         for _ in range(epochs):
-            self._train_one_epoch(steps_per_epoch)
+            self._train_one_epoch(env_steps_per_epoch)
 
-    def _train_one_epoch(self, steps_per_epoch):
-        self._collect_trajectories(steps_per_epoch)
-        self._update_model()
+    def _train_one_epoch(self, env_steps_per_epoch):
+        self._collect_trajectories(env_steps_per_epoch)
+        pi_loss = self._compute_pi_loss()
+        v_loss = self._compute_v_loss()
+        self.actor_critic.backward(pi_loss, v_loss)
 
-    def _collect_trajectories(self, steps_per_epoch):
+    def _collect_trajectories(self, env_steps_per_epoch):
         trajectory_data = TrajectoryData()
         observation = self.env.reset()
-        for _ in range(steps_per_epoch):
-            action, value = self.actor_critic.forward(observation)
+        for _ in range(env_steps_per_epoch):
+            action, value = self.actor_critic.forward(observation) # TODO potentially remove value
             new_observation, reward, done, _ = self.env.step(action)
             trajectory_data.store(observation, action, value, reward)
 
@@ -146,12 +164,18 @@ class PPO():
                 trajectory_data.clear()
                 observation = self.env.reset()
                 done = False
-        self.data_buffer.process_and_store(trajectory_data) # TODO: potentially dont have it cut off trajectory if steps_per_epoch reached
+        self.data_buffer.process_and_store(trajectory_data) # TODO: potentially dont have it cut off trajectory if env_steps_per_epoch reached
 
-
-    def _update_model(self):
-        # TODO: update model
+    def _compute_pi_loss(self):
         pass
+
+    def _compute_v_loss(self):
+        observations = torch.as_tensor(self.data_buffer.observations, dtype=torch.float32)
+        values = self.actor_critic.v_critic.forward(observations)
+        returns = torch.as_tensor(self.data_buffer.returns)
+        
+        loss = ((values - returns)**2).mean()
+        return loss
 
     def run_and_render(self, runs=3, reward_floor=-8):
         for _ in range(runs):
