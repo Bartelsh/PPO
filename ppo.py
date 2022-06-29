@@ -97,7 +97,7 @@ class TrajectoryData():
         self.__init__()
 
 
-class DataBuffer():
+class DataManager():
 
     def __init__(self, gamma):
         self.gamma = gamma
@@ -127,57 +127,62 @@ class DataBuffer():
         self.rewards += (trajectory_data.rewards)
         self.returns += (trajectory_data.returns)
 
+    def clear(self):
+        self.__init__(self.gamma)
+
 
 class PPO():
     """
     The main class that should be constructed externally
     """
 
-    def __init__(self, env, actor_hidden=[32,32], critic_hidden=[32,32], actor_lr=0.0003, critic_lr=0.001, gamma=0.99):
+    def __init__(self, env, actor_hidden=[32,32], critic_hidden=[32,32], actor_lr=0.0003, critic_lr=0.001, gamma=0.99, env_steps_per_epoch=200, iterations_per_epoch=10):
         self.env = env
-        observation_size = env.observation_space.shape[0]
-        action_size = env.action_space.shape[0]
-        self.actor_critic = ActorCritic(observation_size, action_size, actor_hidden, critic_hidden, actor_lr, critic_lr)
-        self.data_buffer = DataBuffer(gamma)
+        self.env_steps_per_epoch = env_steps_per_epoch
+        self.iterations_per_epoch = iterations_per_epoch
+        self.actor_critic = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0], actor_hidden, critic_hidden, actor_lr, critic_lr)
+        self.data_manager = DataManager(gamma)
 
-    def train(self, epochs = 1, env_steps_per_epoch = 200): # TODO implement multiple gradient descent step capability
+    def train(self, epochs = 5):
         for _ in range(epochs):
-            self._train_one_epoch(env_steps_per_epoch)
+            self._train_one_epoch()
 
-    def _train_one_epoch(self, env_steps_per_epoch):
-        self._collect_trajectories(env_steps_per_epoch)
-        pi_loss = self._compute_pi_loss()
-        v_loss = self._compute_v_loss()
-        self.actor_critic.backward(pi_loss, v_loss)
+    def _train_one_epoch(self):
+        self.data_manager.clear()
+        self._collect_trajectories()
+        for _ in range(self.iterations_per_epoch):
+            pi_loss = self._compute_pi_loss()
+            v_loss = self._compute_v_loss()
+            self.actor_critic.backward(pi_loss, v_loss)
 
-    def _collect_trajectories(self, env_steps_per_epoch):
+    def _collect_trajectories(self):
         trajectory_data = TrajectoryData()
         observation = self.env.reset()
-        for _ in range(env_steps_per_epoch):
+        for _ in range(self.env_steps_per_epoch):
             action, value = self.actor_critic.forward(observation) # TODO potentially remove value
             new_observation, reward, done, _ = self.env.step(action)
             trajectory_data.store(observation, action, value, reward)
 
             observation = new_observation
             if done is True:
-                self.data_buffer.process_and_store(trajectory_data)
+                self.data_manager.process_and_store(trajectory_data)
                 trajectory_data.clear()
                 observation = self.env.reset()
                 done = False
-        self.data_buffer.process_and_store(trajectory_data) # TODO: potentially dont have it cut off trajectory if env_steps_per_epoch reached
+        self.data_manager.process_and_store(trajectory_data) # TODO: potentially dont have it cut off trajectory if env_steps_per_epoch reached
 
     def _compute_pi_loss(self):
         pass
 
     def _compute_v_loss(self):
-        observations = torch.as_tensor(self.data_buffer.observations, dtype=torch.float32)
-        values = self.actor_critic.v_critic.forward(observations)
-        returns = torch.as_tensor(self.data_buffer.returns)
-        
+        observations = torch.as_tensor(self.data_manager.observations, dtype=torch.float32)
+        values = self.actor_critic.v_critic(observations)
+        returns = torch.as_tensor(self.data_manager.returns)
+
         loss = ((values - returns)**2).mean()
         return loss
 
-    def run_and_render(self, runs=3, reward_floor=-8):
+    def run_and_render(self, runs=3, reward_floor=-7):
         for _ in range(runs):
             observation = env.reset()
             env.render()
