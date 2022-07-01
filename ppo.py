@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.distributions.normal import Normal
+import numpy as np
+import os
 
 
 def construct_mlp(observation_size, hidden_layers, action_size):
@@ -31,13 +33,21 @@ class Actor(nn.Module):
         # TODO: move to gpu
 
     def forward(self, observation):
-        with torch.no_grad():
-            return self.pi_net(observation)
+        pi = self.get_distribution(observation)
+        action = pi.sample()
+        log_prob = pi.log_prob(action).sum(axis=-1)
+        return action, log_prob
 
     def backward(self, loss):
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+
+    def get_distribution(self, observation):
+        mu = self.pi_net(observation)
+        std = torch.exp(self.log_std)
+        pi = Normal(mu, std)
+        return pi
 
 
 class Critic(nn.Module):
@@ -65,16 +75,18 @@ class ActorCritic():
 
     def forward(self, observation):
         observation = torch.as_tensor(observation, dtype=torch.float32)
-        return self.pi_actor.forward(observation), self.v_critic.forward(observation)
+        action, log_prob = self.pi_actor.forward(observation)
+        value = self.v_critic.forward(observation)
+        return action, log_prob, value
 
     def forward_actor_only(self, observation):
-        return self.pi_actor.forward(torch.as_tensor(observation, dtype=torch.float32))
+        return self.pi_actor.pi_net(torch.as_tensor(observation, dtype=torch.float32)) #TODO fix the sampling
 
     def return_actor(self):
         return self.pi_actor
 
     def backward(self, pi_loss, v_loss):
-        # self.pi_actor.backward(pi_loss)
+        self.pi_actor.backward(pi_loss)
         self.v_critic.backward(v_loss)
 
 
@@ -85,13 +97,17 @@ class TrajectoryData():
         self.actions = []
         self.values = []
         self.rewards = []
-        self.returns = []
+        self.log_probs = []
 
-    def store(self, observation, action, value, reward):
+        self.returns = []
+        self.advantages = []
+
+    def store(self, observation, action, value, reward, log_prob):
         self.observations.append(observation)
         self.actions.append(action)
         self.values.append(value)
         self.rewards.append(reward)
+        self.log_probs.append(log_prob)
 
     def clear(self):
         self.__init__()
@@ -99,56 +115,97 @@ class TrajectoryData():
 
 class DataManager():
 
-    def __init__(self, gamma):
+    def __init__(self, gamma, lambda_):
         self.gamma = gamma
+        self.lambda_ = lambda_
         self.observations = []
         self.actions = []
         self.values = []
         self.rewards = []
+        self.log_probs = []
         self.returns = []
+        self.advantages = []
 
-    def process_and_store(self, trajectory_data):
-        self._calculate_discounted_return(trajectory_data)
+    def process_and_store(self, trajectory_data, bootstrap_value):
+        self._calculate_discounted_return(trajectory_data, bootstrap_value)
+        self._calculate_advantage(trajectory_data, bootstrap_value)
         self._store(trajectory_data)
 
-    def _calculate_discounted_return(self, trajectory_data):
-        for i in range(len(trajectory_data.rewards)):
-            return_ = 0
-            for j, reward in enumerate(trajectory_data.rewards[i:]):
-                return_ += self.gamma**j * reward
-            if isinstance(return_, float):
-                return_ = torch.as_tensor(return_, dtype=torch.float64)
-            trajectory_data.returns.append(return_)
+    def _calculate_discounted_return(self, trajectory_data, bootstrap_value):
+        rewards = trajectory_data.rewards + [bootstrap_value]
+        discounted_returns = self._discounted_sum(rewards, self.gamma)[:-1]
+        trajectory_data.returns = discounted_returns
+
+    def _calculate_advantage(self, trajectory_data, bootstrap_value):
+        rewards = np.array(trajectory_data.rewards + [bootstrap_value])
+        values = np.array(trajectory_data.values + [bootstrap_value])
+
+        deltas = rewards[:-1] + self.gamma*values[1:] - values[:-1]
+        advantages = self._discounted_sum(deltas, self.gamma*self.lambda_)
+        trajectory_data.advantages = advantages
+
+    def _discounted_sum(self, data, discount_factor):
+        discounted_sums = []
+        for i in range(len(data)):
+            sum = 0
+            for j, d in enumerate(data[i:]):
+                sum += discount_factor**j * d
+            if isinstance(d, float): # the -100 reward due to falling is a float instead of a tensor
+                print("DETECTED FLOAT")
+                sum = torch.as_tensor(sum, dtype=torch.float64)
+            discounted_sums.append(sum)
+        return discounted_sums
 
     def _store(self, trajectory_data):
-        self.observations += (trajectory_data.observations)
-        self.actions += (trajectory_data.actions)
-        self.values += (trajectory_data.values)
-        self.rewards += (trajectory_data.rewards)
-        self.returns += (trajectory_data.returns)
+        self.observations += trajectory_data.observations
+        self.actions += trajectory_data.actions
+        self.values += trajectory_data.values
+        self.rewards += trajectory_data.rewards
+        self.log_probs += trajectory_data.log_probs
+        self.returns += trajectory_data.returns
+        self.advantages += trajectory_data.advantages
+
+    def get_pi_data(self):
+        observations = torch.as_tensor(self.observations, dtype=torch.float32)
+        actions = torch.stack(self.actions)
+        old_log_probs = torch.stack(self.log_probs).detach()
+        advantages = torch.as_tensor(self.advantages, dtype=torch.float32)
+        return observations, actions, old_log_probs, advantages
+
+    def get_v_data(self):
+        observations = torch.as_tensor(self.observations, dtype=torch.float32)
+        returns = torch.as_tensor(self.returns, dtype=torch.float32)
+        return observations, returns
 
     def clear(self):
-        self.__init__(self.gamma)
+        self.__init__(self.gamma, self.lambda_)
 
 
 class PPO():
     """
     The main class that should be constructed externally
     """
-
-    def __init__(self, env, actor_hidden=[32,32], critic_hidden=[32,32], actor_lr=0.0003, critic_lr=0.001, gamma=0.99, env_steps_per_epoch=200, iterations_per_epoch=10):
+    # # TODO: implement logging
+    def __init__(self, env, actor_hidden=[32,32], critic_hidden=[32,32], actor_lr=0.0003, critic_lr=0.001, gamma=0.99,
+                 lambda_=0.97, clip_epsilon=0.2, env_steps_per_epoch=200, iterations_per_epoch=10, save_frequency=10,
+                 save_dir="model"):
         self.env = env
         self.env_steps_per_epoch = env_steps_per_epoch
         self.iterations_per_epoch = iterations_per_epoch
+        self.clip_epsilon = clip_epsilon
+        self.save_frequency = save_frequency
+        self.save_dir = save_dir
         self.actor_critic = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0], actor_hidden, critic_hidden, actor_lr, critic_lr)
-        self.data_manager = DataManager(gamma)
+        self.data_manager = DataManager(gamma, lambda_)
 
     def train(self, epochs = 5):
-        for _ in range(epochs):
+        for i in range(epochs):
             self._train_one_epoch()
+            if i % self.save_frequency == 0:
+                self.save_model(i)
+        self.save_model(i)
 
     def _train_one_epoch(self):
-        self.data_manager.clear()
         self._collect_trajectories()
         for _ in range(self.iterations_per_epoch):
             pi_loss = self._compute_pi_loss()
@@ -156,28 +213,38 @@ class PPO():
             self.actor_critic.backward(pi_loss, v_loss)
 
     def _collect_trajectories(self):
+        self.data_manager.clear()
         trajectory_data = TrajectoryData()
         observation = self.env.reset()
         for _ in range(self.env_steps_per_epoch):
-            action, value = self.actor_critic.forward(observation) # TODO potentially remove value
-            new_observation, reward, done, _ = self.env.step(action)
-            trajectory_data.store(observation, action, value, reward)
+            action, log_prob, value = self.actor_critic.forward(observation)
+            new_observation, reward, done, _ = self.env.step(action.detach())
+            trajectory_data.store(observation, action, value, reward, log_prob)
 
             observation = new_observation
             if done is True:
-                self.data_manager.process_and_store(trajectory_data)
+                self.data_manager.process_and_store(trajectory_data, 0)
                 trajectory_data.clear()
                 observation = self.env.reset()
                 done = False
-        self.data_manager.process_and_store(trajectory_data) # TODO: potentially dont have it cut off trajectory if env_steps_per_epoch reached
 
-    def _compute_pi_loss(self):
-        pass
+        bootstrap_value = self.actor_critic.v_critic(torch.as_tensor(observation, dtype=torch.float32)).squeeze()
+        self.data_manager.process_and_store(trajectory_data, bootstrap_value)
+
+    def _compute_pi_loss(self): # TODO implement KL early stopping
+        observations, actions, old_log_probs, advantages = self.data_manager.get_pi_data()
+
+        pi = self.actor_critic.pi_actor.get_distribution(observations)
+        log_probs = pi.log_prob(actions).sum(axis=-1)
+        ratios = torch.exp(log_probs - old_log_probs)
+        clipped_advantages = advantages * torch.clamp(ratios, 1-self.clip_epsilon, 1+self.clip_epsilon)
+
+        loss = -torch.min(ratios * advantages, clipped_advantages).mean()
+        return loss
 
     def _compute_v_loss(self):
-        observations = torch.as_tensor(self.data_manager.observations, dtype=torch.float32)
+        observations, returns = self.data_manager.get_v_data()
         values = self.actor_critic.v_critic(observations)
-        returns = torch.as_tensor(self.data_manager.returns)
 
         loss = ((values - returns)**2).mean()
         return loss
@@ -190,15 +257,26 @@ class PPO():
             cumulative_reward = 0
             while not done:
                 action = self.actor_critic.forward_actor_only(observation)
-                observation, reward, done, _ = env.step(action)
+                observation, reward, done, _ = env.step(action.detach())
                 cumulative_reward += reward
                 env.render()
                 if cumulative_reward < reward_floor:
                     break
             env.close()
 
-    def save_model(self):
-        raise NotImplementedError
+    def save_model(self, i):
+        save_path = os.path.join(os.getcwd(), self.save_dir)
+        if not os.path.isdir(save_path):
+            os.mkdir(save_path)
+        torch.save(self.actor_critic.pi_actor.state_dict(), os.path.join(save_path, f"epoch_{i}_actor"))
+        torch.save(self.actor_critic.v_critic.state_dict(), os.path.join(save_path, f"epoch_{i}_critic"))
+
+    def load_model(self, folder_name, epoch_number):
+        actor_path = os.path.join(os.getcwd(), folder_name, f"epoch_{epoch_number}_actor")
+        self.actor_critic.pi_actor.load_state_dict(torch.load(actor_path))
+
+        critic_path = os.path.join(os.getcwd(), folder_name, f"epoch_{epoch_number}_critic")
+        self.actor_critic.v_critic.load_state_dict(torch.load(critic_path))
 
 
 """
@@ -209,8 +287,12 @@ if __name__ == "__main__":
 
     env = gym.make("BipedalWalker-v3")
 
-    PPO = PPO(env)
-    PPO.train()
-    PPO.run_and_render()
+    ppo = PPO(env)
+    ppo.train()
+    ppo.run_and_render()
+
+    ppo = PPO(env)
+    ppo.load_model("model", 4)
+    ppo.run_and_render()
 
     # policy = PPO.return_actor()
