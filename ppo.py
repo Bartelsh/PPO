@@ -80,7 +80,8 @@ class ActorCritic():
         return action, log_prob, value
 
     def forward_actor_only(self, observation):
-        return self.pi_actor.pi_net(torch.as_tensor(observation, dtype=torch.float32)) #TODO fix the sampling
+        action, _ = self.pi_actor.forward(torch.as_tensor(observation, dtype=torch.float32))
+        return action
 
     def return_actor(self):
         return self.pi_actor
@@ -187,7 +188,7 @@ class PPO():
     """
     # # TODO: implement logging
     def __init__(self, env, actor_hidden=[32,32], critic_hidden=[32,32], actor_lr=0.0003, critic_lr=0.001, gamma=0.99,
-                 lambda_=0.97, clip_epsilon=0.2, env_steps_per_epoch=200, iterations_per_epoch=10, save_frequency=10,
+                 lambda_=0.97, clip_epsilon=0.2, env_steps_per_epoch=4000, iterations_per_epoch=20, save_frequency=10,
                  save_dir="model"):
         self.env = env
         self.env_steps_per_epoch = env_steps_per_epoch
@@ -200,6 +201,7 @@ class PPO():
 
     def train(self, epochs = 5):
         for i in range(epochs):
+            print(f"epoch {i}")
             self._train_one_epoch()
             if i % self.save_frequency == 0:
                 self.save_model(i)
@@ -216,13 +218,14 @@ class PPO():
         self.data_manager.clear()
         trajectory_data = TrajectoryData()
         observation = self.env.reset()
-        for _ in range(self.env_steps_per_epoch):
+        for i in range(self.env_steps_per_epoch):
             action, log_prob, value = self.actor_critic.forward(observation)
             new_observation, reward, done, _ = self.env.step(action.detach())
             trajectory_data.store(observation, action, value, reward, log_prob)
 
             observation = new_observation
             if done is True:
+                print("episode return: ", sum(trajectory_data.rewards).item())
                 self.data_manager.process_and_store(trajectory_data, 0)
                 trajectory_data.clear()
                 observation = self.env.reset()
@@ -288,11 +291,11 @@ if __name__ == "__main__":
     env = gym.make("BipedalWalker-v3")
 
     ppo = PPO(env)
-    ppo.train()
+    ppo.train(20)
     ppo.run_and_render()
 
-    ppo = PPO(env)
-    ppo.load_model("model", 4)
-    ppo.run_and_render()
+    # ppo = PPO(env)
+    # ppo.load_model("model", 19)
+    # ppo.run_and_render()
 
     # policy = PPO.return_actor()
