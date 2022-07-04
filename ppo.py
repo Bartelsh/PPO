@@ -8,8 +8,11 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.distributions.normal import Normal
-import numpy as np
+
 import os
+import time
+import numpy as np
+import pandas as pd
 
 
 def construct_mlp(observation_size, hidden_layers, action_size):
@@ -187,8 +190,8 @@ class PPO():
     The main class that should be constructed externally
     """
     # # TODO: implement logging
-    def __init__(self, env, actor_hidden=[32,32], critic_hidden=[32,32], actor_lr=0.0003, critic_lr=0.001, gamma=0.99,
-                 lambda_=0.97, clip_epsilon=0.2, env_steps_per_epoch=4000, iterations_per_epoch=20, save_frequency=10,
+    def __init__(self, env, actor_hidden=[64,64], critic_hidden=[64,64], actor_lr=0.0003, critic_lr=0.001, gamma=0.99,
+                 lambda_=0.97, clip_epsilon=0.2, env_steps_per_epoch=4000, iterations_per_epoch=25, save_frequency=10,
                  save_dir="model"):
         self.env = env
         self.env_steps_per_epoch = env_steps_per_epoch
@@ -199,13 +202,21 @@ class PPO():
         self.actor_critic = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0], actor_hidden, critic_hidden, actor_lr, critic_lr)
         self.data_manager = DataManager(gamma, lambda_)
 
+        self.logger = Logger(save_dir)
+
     def train(self, epochs = 5):
+        self.logger.reset_timer()
         for i in range(epochs):
             print(f"epoch {i}")
             self._train_one_epoch()
+            self.logger.record_time()
             if i % self.save_frequency == 0:
-                self.save_model(i)
+                self.save_data(i)
+        self.save_data(i)
+
+    def save_data(self, i):
         self.save_model(i)
+        self.logger.export_to_csv()
 
     def _train_one_epoch(self):
         self._collect_trajectories()
@@ -225,7 +236,7 @@ class PPO():
 
             observation = new_observation
             if done is True:
-                print("episode return: ", sum(trajectory_data.rewards).item())
+                self.logger.store(sum(trajectory_data.rewards).item(), len(trajectory_data.rewards))
                 self.data_manager.process_and_store(trajectory_data, 0)
                 trajectory_data.clear()
                 observation = self.env.reset()
@@ -233,6 +244,7 @@ class PPO():
 
         bootstrap_value = self.actor_critic.v_critic(torch.as_tensor(observation, dtype=torch.float32)).squeeze()
         self.data_manager.process_and_store(trajectory_data, bootstrap_value)
+        # # TODO: potientially also log trajectories that are cut off
 
     def _compute_pi_loss(self): # TODO implement KL early stopping
         observations, actions, old_log_probs, advantages = self.data_manager.get_pi_data()
@@ -254,18 +266,18 @@ class PPO():
 
     def run_and_render(self, runs=3, reward_floor=-7):
         for _ in range(runs):
-            observation = env.reset()
-            env.render()
+            observation = self.env.reset()
+            self.env.render()
             done = False
             cumulative_reward = 0
             while not done:
                 action = self.actor_critic.forward_actor_only(observation)
-                observation, reward, done, _ = env.step(action.detach())
+                observation, reward, done, _ = self.env.step(action.detach())
                 cumulative_reward += reward
-                env.render()
+                self.env.render()
                 if cumulative_reward < reward_floor:
                     break
-            env.close()
+            self.env.close()
 
     def save_model(self, i):
         save_path = os.path.join(os.getcwd(), self.save_dir)
@@ -282,6 +294,38 @@ class PPO():
         self.actor_critic.v_critic.load_state_dict(torch.load(critic_path))
 
 
+class Logger():
+
+    def __init__(self, save_dir):
+        self.total_return = []
+        self.timesteps = []
+        self.elapsed_time = []
+        self.save_dir = save_dir
+        self.start_time = 0
+
+    def reset_timer(self):
+        self.start_time = time.time()
+
+    def record_time(self):
+        self.elapsed_time.append(time.time()-self.start_time)
+        self.reset_timer()
+
+    def store(self, total_return, timesteps):
+        self.total_return.append(total_return)
+        self.timesteps.append(timesteps)
+
+    def export_to_csv(self):
+        df = pd.DataFrame({'total_return': self.total_return, 'timesteps': self.timesteps})
+        df['average_return'] = df['total_return']/df['timesteps']
+        df.to_csv(os.path.join(os.getcwd(), self.save_dir, "train_log.csv"))
+
+        with open(os.path.join(os.getcwd(), self.save_dir, "time_log.txt"), "w") as file:
+            file.write(f"Total time: {sum(self.elapsed_time)}\n" )
+            file.write(f"Average time per epoch: {sum(self.elapsed_time)/len(self.elapsed_time)}\n")
+            for i, element in enumerate(self.elapsed_time):
+                file.write(f"epoch {i}: {element}\n")
+
+
 """
 Example showing how to use this PPO module below
 """
@@ -290,8 +334,8 @@ if __name__ == "__main__":
 
     env = gym.make("BipedalWalker-v3")
 
-    ppo = PPO(env)
-    ppo.train(20)
+    ppo = PPO(env, [256, 256], [256, 256], env_steps_per_epoch=2000, save_dir="test")
+    ppo.train(2)
     ppo.run_and_render()
 
     # ppo = PPO(env)
