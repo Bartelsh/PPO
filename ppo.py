@@ -334,9 +334,9 @@ if __name__ == "__main__":
 
     env = gym.make("BipedalWalker-v3")
 
-    ppo = PPO(env, [256, 256], [256, 256], env_steps_per_epoch=2000, save_dir="test")
-    ppo.train(2)
-    ppo.run_and_render()
+    ppo = PPO(env, [256, 256], [256, 256])
+    ppo.train(400)
+    # ppo.run_and_render()
 
     # ppo = PPO(env)
     # ppo.load_model("model", 19)
