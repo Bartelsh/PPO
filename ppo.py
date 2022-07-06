@@ -32,7 +32,7 @@ class Actor(nn.Module):
         super().__init__()
         self.pi_net = construct_mlp(observation_size, hidden_layers, action_size)
         self.log_std = nn.Parameter(-0.5*torch.ones(action_size, dtype=torch.float32))
-        self.optimizer = Adam(self.pi_net.parameters(), lr=lr)
+        self.optimizer = Adam(self.parameters(), lr=lr)
         # TODO: move to gpu
 
     def forward(self, observation):
@@ -58,7 +58,7 @@ class Critic(nn.Module):
     def __init__(self, observation_size, hidden_layers, lr):
         super().__init__()
         self.v_net = construct_mlp(observation_size, hidden_layers, 1)
-        self.optimizer = Adam(self.v_net.parameters(), lr=lr)
+        self.optimizer = Adam(self.parameters(), lr=lr)
         # TODO: move to gpu
 
     def forward(self, observation):
@@ -191,13 +191,14 @@ class PPO():
     """
     # # TODO: implement logging
     def __init__(self, env, actor_hidden=[64,64], critic_hidden=[64,64], actor_lr=0.0003, critic_lr=0.001, gamma=0.99,
-                 lambda_=0.97, clip_epsilon=0.2, env_steps_per_epoch=4000, iterations_per_epoch=25, save_frequency=10,
-                 save_dir="model"):
+                 lambda_=0.97, clip_epsilon=0.2, env_steps_per_epoch=4000, iterations_per_epoch=25, kl_target=0.01,
+                 save_frequency=10, save_dir="model"):
         self.env = env
         self.env_steps_per_epoch = env_steps_per_epoch
         self.iterations_per_epoch = iterations_per_epoch
         self.clip_epsilon = clip_epsilon
         self.save_frequency = save_frequency
+        self.kl_target = kl_target
         self.save_dir = save_dir
         self.actor_critic = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0], actor_hidden, critic_hidden, actor_lr, critic_lr)
         self.data_manager = DataManager(gamma, lambda_)
@@ -219,11 +220,14 @@ class PPO():
         self.logger.export_data()
 
     def _train_one_epoch(self):
+        print("ggg", self.actor_critic.pi_actor.log_std)
         self._collect_trajectories()
         for _ in range(self.iterations_per_epoch):
-            pi_loss = self._compute_pi_loss()
+            pi_loss, kl = self._compute_pi_loss()
             v_loss = self._compute_v_loss()
             self.actor_critic.backward(pi_loss, v_loss)
+            if kl > 1.5 * self.kl_target:
+                break
 
     def _collect_trajectories(self):
         self.data_manager.clear()
@@ -255,7 +259,8 @@ class PPO():
         clipped_advantages = advantages * torch.clamp(ratios, 1-self.clip_epsilon, 1+self.clip_epsilon)
 
         loss = -torch.min(ratios * advantages, clipped_advantages).mean()
-        return loss
+        approximate_kl = (old_log_probs - log_probs).mean().item()
+        return loss, approximate_kl
 
     def _compute_v_loss(self):
         observations, returns = self.data_manager.get_v_data()
@@ -334,10 +339,10 @@ if __name__ == "__main__":
 
     env = gym.make("BipedalWalker-v3")
 
-    ppo = PPO(env, [256, 256], [256, 256], save_dir="test")
+    ppo = PPO(env, [256, 256], [256, 256], env_steps_per_epoch=400, save_dir="test")
     # ppo.load_model("model_1", 199)
-    ppo.train(5)
-    # ppo.run_and_render()
+    ppo.train(4)
+    ppo.run_and_render()
 
     # ppo = PPO(env)
     # ppo.run_and_render()
