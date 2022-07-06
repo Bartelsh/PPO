@@ -189,7 +189,7 @@ class PPO():
     """
     The main class that should be constructed externally
     """
-    # # TODO: implement logging
+
     def __init__(self, env, actor_hidden=[64,64], critic_hidden=[64,64], actor_lr=0.0003, critic_lr=0.001, gamma=0.99,
                  lambda_=0.97, clip_epsilon=0.2, env_steps_per_epoch=4000, iterations_per_epoch=25, kl_target=0.01,
                  save_frequency=10, save_dir="model"):
@@ -250,7 +250,7 @@ class PPO():
         self.data_manager.process_and_store(trajectory_data, bootstrap_value)
         # # TODO: potientially also log trajectories that are cut off
 
-    def _compute_pi_loss(self): # TODO implement KL early stopping
+    def _compute_pi_loss(self):
         observations, actions, old_log_probs, advantages = self.data_manager.get_pi_data()
 
         pi = self.actor_critic.pi_actor.get_distribution(observations)
