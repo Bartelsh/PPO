@@ -31,8 +31,8 @@ class Actor(nn.Module):
     def __init__(self, observation_size, hidden_layers, action_size, lr):
         super().__init__()
         self.pi_net = construct_mlp(observation_size, hidden_layers, action_size)
+        self.log_std = nn.Parameter(-0.5*torch.ones(action_size, dtype=torch.float32))
         self.optimizer = Adam(self.pi_net.parameters(), lr=lr)
-        self.log_std = -0.5*torch.ones(action_size)
         # TODO: move to gpu
 
     def forward(self, observation):
@@ -216,7 +216,7 @@ class PPO():
 
     def save_data(self, i):
         self.save_model(i)
-        self.logger.export_to_csv()
+        self.logger.export_data()
 
     def _train_one_epoch(self):
         self._collect_trajectories()
@@ -314,7 +314,7 @@ class Logger():
         self.total_return.append(total_return)
         self.timesteps.append(timesteps)
 
-    def export_to_csv(self):
+    def export_data(self):
         df = pd.DataFrame({'total_return': self.total_return, 'timesteps': self.timesteps})
         df['average_return'] = df['total_return']/df['timesteps']
         df.to_csv(os.path.join(os.getcwd(), self.save_dir, "train_log.csv"))
@@ -334,12 +334,12 @@ if __name__ == "__main__":
 
     env = gym.make("BipedalWalker-v3")
 
-    ppo = PPO(env, [256, 256], [256, 256])
-    ppo.train(400)
+    ppo = PPO(env, [256, 256], [256, 256], save_dir="test")
+    # ppo.load_model("model_1", 199)
+    ppo.train(5)
     # ppo.run_and_render()
 
     # ppo = PPO(env)
-    # ppo.load_model("model", 19)
     # ppo.run_and_render()
 
     # policy = PPO.return_actor()
