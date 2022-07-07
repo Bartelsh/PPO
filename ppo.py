@@ -116,6 +116,9 @@ class TrajectoryData():
     def clear(self):
         self.__init__()
 
+    def get_len(self):
+        return len(self.observations)
+
 
 class DataManager():
 
@@ -191,9 +194,10 @@ class PPO():
     """
 
     def __init__(self, env, actor_hidden=[64,64], critic_hidden=[64,64], actor_lr=0.0003, critic_lr=0.001, gamma=0.99,
-                 lambda_=0.97, clip_epsilon=0.2, env_steps_per_epoch=4000, iterations_per_epoch=25, kl_target=0.01,
-                 save_frequency=10, save_dir="model"):
+                 lambda_=0.97, clip_epsilon=0.2, max_steps_per_episode=1000, env_steps_per_epoch=4000, iterations_per_epoch=25,
+                 kl_target=0.01, save_frequency=10, save_dir="model"):
         self.env = env
+        self.max_steps_per_episode = max_steps_per_episode
         self.env_steps_per_epoch = env_steps_per_epoch
         self.iterations_per_epoch = iterations_per_epoch
         self.clip_epsilon = clip_epsilon
@@ -220,7 +224,6 @@ class PPO():
         self.logger.export_data()
 
     def _train_one_epoch(self):
-        print("ggg", self.actor_critic.pi_actor.log_std)
         self._collect_trajectories()
         for _ in range(self.iterations_per_epoch):
             pi_loss, kl = self._compute_pi_loss()
@@ -245,10 +248,10 @@ class PPO():
                 trajectory_data.clear()
                 observation = self.env.reset()
                 done = False
-
-        bootstrap_value = self.actor_critic.v_critic(torch.as_tensor(observation, dtype=torch.float32)).squeeze()
-        self.data_manager.process_and_store(trajectory_data, bootstrap_value)
-        # # TODO: potientially also log trajectories that are cut off
+            elif trajectory_data.get_len() > self.max_steps_per_episode or i == self.env_steps_per_epoch-1:
+                bootstrap_value = self.actor_critic.v_critic(torch.as_tensor(observation, dtype=torch.float32)).squeeze()
+                self.data_manager.process_and_store(trajectory_data, bootstrap_value)
+                # # TODO: potientially also log trajectories that are cut off
 
     def _compute_pi_loss(self):
         observations, actions, old_log_probs, advantages = self.data_manager.get_pi_data()
@@ -342,7 +345,7 @@ if __name__ == "__main__":
     ppo = PPO(env, [256, 256], [256, 256], env_steps_per_epoch=400, save_dir="test")
     # ppo.load_model("model_1", 199)
     ppo.train(4)
-    ppo.run_and_render()
+    # ppo.run_and_render()
 
     # ppo = PPO(env)
     # ppo.run_and_render()
